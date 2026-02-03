@@ -1,0 +1,14 @@
+# binários e objetos
+*.o
+trab2
+btree.bin
+
+# arquivos de saída
+saida.txt
+
+# vscode
+.vscode/
+
+# temporários
+*~
+
