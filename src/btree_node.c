@@ -49,7 +49,7 @@ void node_write(FILE *fp, long offset, BTreeNode *n)
 
     fwrite(n->chaves, sizeof(int), n->ordem - 1, fp);
     fwrite(n->registros, sizeof(int), n->ordem - 1, fp);
-    fwrite(n->removido, sizeof(int), n->ordem - 1, fp); // 👈 NOVO
+    fwrite(n->removido, sizeof(int), n->ordem - 1, fp);
     fwrite(n->filhos, sizeof(long), n->ordem, fp);
 
     fflush(fp);
@@ -66,7 +66,7 @@ void node_read(FILE *fp, long offset, BTreeNode *n)
 
     fread(n->chaves, sizeof(int), n->ordem - 1, fp);
     fread(n->registros, sizeof(int), n->ordem - 1, fp);
-    fread(n->removido, sizeof(int), n->ordem - 1, fp); // 👈 NOVO
+    fread(n->removido, sizeof(int), n->ordem - 1, fp);
     fread(n->filhos, sizeof(long), n->ordem, fp);
 }
 
@@ -89,7 +89,7 @@ long node_disk_size(int ordem)
         sizeof(int) +                 // n_chaves
         (ordem - 1) * sizeof(int) +   // chaves
         (ordem - 1) * sizeof(int) +   // registros
-        (ordem - 1) * sizeof(int) +   // removido  👈
+        (ordem - 1) * sizeof(int) +   // removido  
         ordem * sizeof(long);         // filhos
 }
 
