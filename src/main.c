@@ -12,10 +12,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* =====================================================
-       ABERTURA DOS ARQUIVOS
-       ===================================================== */
-
     FILE *in = fopen(argv[1], "r");
     if (!in) {
         fprintf(stderr, "Erro ao abrir arquivo de entrada.\n");
@@ -29,10 +25,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* =====================================================
-       LEITURA DOS PARÂMETROS
-       ===================================================== */
-
     int ordem, n;
 
     if (fscanf(in, "%d", &ordem) != 1 ||
@@ -43,10 +35,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* =====================================================
-       CRIAÇÃO DA ÁRVORE
-       ===================================================== */
-
     BTree *t = btree_create(ordem, "btree.bin");
 
     if (!t) {
@@ -55,10 +43,6 @@ int main(int argc, char *argv[])
         fclose(out);
         return 1;
     }
-
-    /* =====================================================
-       PROCESSAMENTO DAS OPERAÇÕES
-       ===================================================== */
 
     char op;
     int chave, reg;
@@ -97,16 +81,8 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* =====================================================
-       IMPRESSÃO FINAL
-       ===================================================== */
-
     fprintf(out, "-- ARVORE B\n");
     btree_print(t, out);
-
-    /* =====================================================
-       FINALIZAÇÃO
-       ===================================================== */
 
     btree_destroy(t);
     fclose(in);
