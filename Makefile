@@ -1,11 +1,19 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11 -Iinclude
+CFLAGS = -Wall -Wextra -g -Iinclude
+SRC_DIR = src
+OBJ_DIR = src
 
-SRC = src/main.c src/btree.c src/btree_node.c src/queue.c
-OBJ = $(SRC:.c=.o)
+OBJ = $(OBJ_DIR)/main.o $(OBJ_DIR)/btree.o $(OBJ_DIR)/btree_node.o $(OBJ_DIR)/queue.o
 
-trab2: $(OBJ)
-	$(CC) $(CFLAGS) -o trab2 $(OBJ)
+EXEC = trab2
+
+all: $(EXEC)
+
+$(EXEC): $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f src/*.o trab2 btree.bin
+	rm -f $(OBJ) $(EXEC) btree.bin

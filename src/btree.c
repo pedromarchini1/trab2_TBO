@@ -1,318 +1,361 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "btree.h"
 #include "btree_node.h"
+#include "queue.h"
 
-struct BTree
-{
+/* =========================================================
+   ESTRUTURA DO HEADER (persistente no disco)
+   ========================================================= */
+
+typedef struct {
     int ordem;
     long raiz;
     long prox_no;
+} BTreeHeader;
+
+struct BTree {
+    BTreeHeader header;
     FILE *fp;
 };
+
+/* =========================================================
+   FUNÇÕES AUXILIARES DE DISCO
+   ========================================================= */
+
+static long node_offset(BTree *t, long idx)
+{
+    return sizeof(BTreeHeader) +
+           idx * node_disk_size(t->header.ordem);
+}
+
+static void write_header(BTree *t)
+{
+    fseek(t->fp, 0, SEEK_SET);
+    fwrite(&t->header, sizeof(BTreeHeader), 1, t->fp);
+    fflush(t->fp);
+}
+
+static void read_header(BTree *t)
+{
+    fseek(t->fp, 0, SEEK_SET);
+    fread(&t->header, sizeof(BTreeHeader), 1, t->fp);
+}
+
+static BTreeNode *read_node(BTree *t, long idx)
+{
+    BTreeNode *n = node_create(t->header.ordem, 0);
+    node_read(t->fp, node_offset(t, idx), n);
+    return n;
+}
+
+static void write_node(BTree *t, long idx, BTreeNode *n)
+{
+    node_write(t->fp, node_offset(t, idx), n);
+}
+
+/* =========================================================
+   CRIAÇÃO / ABERTURA
+   ========================================================= */
 
 BTree *btree_create(int ordem, const char *filename)
 {
     BTree *t = malloc(sizeof(BTree));
-    t->ordem = ordem;
-    t->prox_no = 0;
+    if (!t) return NULL;
+
     t->fp = fopen(filename, "w+b");
+    if (!t->fp) {
+        free(t);
+        return NULL;
+    }
+
+    t->header.ordem = ordem;
+    t->header.raiz = 0;
+    t->header.prox_no = 1;
+
+    write_header(t);
 
     BTreeNode *root = node_create(ordem, 1);
-    t->raiz = t->prox_no++;
-
-    node_write(t->fp,
-               t->raiz * node_disk_size(t->ordem),
-               root);
-
+    write_node(t, 0, root);
     node_destroy(root);
 
     return t;
 }
 
+BTree *btree_open(const char *filename)
+{
+    BTree *t = malloc(sizeof(BTree));
+    if (!t) return NULL;
+
+    t->fp = fopen(filename, "r+b");
+    if (!t->fp) {
+        free(t);
+        return NULL;
+    }
+
+    read_header(t);
+    return t;
+}
+
 void btree_destroy(BTree *t)
 {
-    if (!t)
-        return;
+    if (!t) return;
+    write_header(t);
     fclose(t->fp);
     free(t);
 }
 
-void btree_split_child(BTree *t,
-                       BTreeNode *pai,
-                       long idx_pai,
-                       int i,
-                       long idx_filho)
+/* =========================================================
+   BUSCA
+   ========================================================= */
+
+static int search_rec(BTree *t, long idx, int key, int *out_reg)
 {
-    int m = t->ordem;
-    int mid = (m - 1) / 2;
-    long off = node_disk_size(m);
+    BTreeNode *n = read_node(t, idx);
+    int i = 0;
 
-    /* lê o filho cheio */
-    BTreeNode *y = node_create(m, 0);
-    node_read(t->fp, idx_filho * off, y);
+    while (i < n->n_chaves && key > n->chaves[i])
+        i++;
 
-    /* cria novo nó z */
-    BTreeNode *z = node_create(m, y->is_leaf);
-    z->n_chaves = (m - 1) - mid - 1;
-
-    /* copia chaves/registros */
-    for (int j = 0; j < z->n_chaves; j++)
-    {
-        z->chaves[j] = y->chaves[mid + 1 + j];
-        z->registros[j] = y->registros[mid + 1 + j];
-        z->removido[j] = y->removido[mid + 1 + j];
+    if (i < n->n_chaves && key == n->chaves[i]) {
+        *out_reg = n->registros[i];
+        node_destroy(n);
+        return 1;
     }
 
-    /* copia filhos */
-    if (!y->is_leaf)
-    {
+    if (n->is_leaf) {
+        node_destroy(n);
+        return 0;
+    }
+
+    long next = n->filhos[i];
+    node_destroy(n);
+    return search_rec(t, next, key, out_reg);
+}
+
+int btree_search(BTree *t, int chave, int *out_reg)
+{
+    return search_rec(t, t->header.raiz, chave, out_reg);
+}
+
+/* =========================================================
+   SPLIT
+   ========================================================= */
+
+static void split_child(BTree *t, long parent_idx,
+                        BTreeNode *parent, int i)
+{
+    int ordem = t->header.ordem;
+    int mid = (ordem - 1) / 2;
+
+    long y_idx = parent->filhos[i];
+    BTreeNode *y = read_node(t, y_idx);
+
+    long z_idx = t->header.prox_no++;
+    BTreeNode *z = node_create(ordem, y->is_leaf);
+
+    z->n_chaves = ordem - 1 - mid - 1;
+
+    for (int j = 0; j < z->n_chaves; j++) {
+        z->chaves[j] = y->chaves[mid + 1 + j];
+        z->registros[j] = y->registros[mid + 1 + j];
+    }
+
+    if (!y->is_leaf) {
         for (int j = 0; j <= z->n_chaves; j++)
             z->filhos[j] = y->filhos[mid + 1 + j];
     }
 
     y->n_chaves = mid;
 
-    /* abre espaço no pai */
-    for (int j = pai->n_chaves; j >= i + 1; j--)
-        pai->filhos[j + 1] = pai->filhos[j];
+    for (int j = parent->n_chaves; j >= i + 1; j--)
+        parent->filhos[j + 1] = parent->filhos[j];
 
-    long idx_z = t->prox_no++;
-    pai->filhos[i + 1] = idx_z;
+    parent->filhos[i + 1] = z_idx;
 
-    for (int j = pai->n_chaves - 1; j >= i; j--)
-    {
-        pai->chaves[j + 1] = pai->chaves[j];
-        pai->registros[j + 1] = pai->registros[j];
-        pai->removido[j + 1] = pai->removido[j];
+    for (int j = parent->n_chaves - 1; j >= i; j--) {
+        parent->chaves[j + 1] = parent->chaves[j];
+        parent->registros[j + 1] = parent->registros[j];
     }
 
-    /* promove a chave do meio */
-    pai->chaves[i] = y->chaves[mid];
-    pai->registros[i] = y->registros[mid];
-    pai->removido[i] = y->removido[mid];
-    pai->n_chaves++;
+    parent->chaves[i] = y->chaves[mid];
+    parent->registros[i] = y->registros[mid];
+    parent->n_chaves++;
 
-    /* escreve tudo */
-    node_write(t->fp, idx_filho * off, y);
-    node_write(t->fp, idx_z * off, z);
-    node_write(t->fp, idx_pai * off, pai);
+    write_node(t, y_idx, y);
+    write_node(t, z_idx, z);
+    write_node(t, parent_idx, parent);
+    write_header(t);
 
     node_destroy(y);
     node_destroy(z);
 }
 
-static void insert_non_full(BTree *t,
-                            BTreeNode *x,
-                            long idx_x,
-                            int k,
-                            int reg)
-{
-    long off = node_disk_size(t->ordem);
-    int i = x->n_chaves - 1;
+/* =========================================================
+   INSERÇÃO
+   ========================================================= */
 
-    if (x->is_leaf)
-    {
-        while (i >= 0 && k < x->chaves[i])
-        {
-            x->chaves[i + 1] = x->chaves[i];
-            x->registros[i + 1] = x->registros[i];
-            x->removido[i + 1] = x->removido[i];
+static void insert_non_full(BTree *t, long idx,
+                            BTreeNode *n,
+                            int key, int reg)
+{
+    int i = n->n_chaves - 1;
+
+    if (n->is_leaf) {
+
+        while (i >= 0 && key < n->chaves[i]) {
+            n->chaves[i + 1] = n->chaves[i];
+            n->registros[i + 1] = n->registros[i];
             i--;
         }
 
-        x->chaves[i + 1] = k;
-        x->registros[i + 1] = reg;
-        x->removido[i + 1] = 0;
-        x->n_chaves++;
+        n->chaves[i + 1] = key;
+        n->registros[i + 1] = reg;
+        n->n_chaves++;
 
-        node_write(t->fp, idx_x * off, x);
+        write_node(t, idx, n);
     }
-    else
-    {
-        while (i >= 0 && k < x->chaves[i])
+    else {
+        while (i >= 0 && key < n->chaves[i])
             i--;
         i++;
 
-        long idx_filho = x->filhos[i];
-        BTreeNode *child = node_create(t->ordem, 0);
-        node_read(t->fp, idx_filho * off, child);
+        BTreeNode *child = read_node(t, n->filhos[i]);
 
-        if (node_is_full(child, t->ordem))
-        {
-            btree_split_child(t, x, idx_x, i, idx_filho);
+        if (node_is_full(child, t->header.ordem)) {
+            split_child(t, idx, n, i);
+            node_destroy(child);
+            n = read_node(t, idx);
 
-            /* recarrega o pai após split */
-            node_read(t->fp, idx_x * off, x);
-
-            if (k > x->chaves[i])
+            if (key > n->chaves[i])
                 i++;
-
-            idx_filho = x->filhos[i];
-            node_read(t->fp, idx_filho * off, child);
+            child = read_node(t, n->filhos[i]);
         }
 
-        insert_non_full(t, child, idx_filho, k, reg);
+        insert_non_full(t, n->filhos[i], child, key, reg);
         node_destroy(child);
     }
 }
 
 void btree_insert(BTree *t, int chave, int registro)
 {
-    long off = node_disk_size(t->ordem);
+    int tmp;
+    if (btree_search(t, chave, &tmp))
+        return;
 
-    /* lê a raiz */
-    BTreeNode *root = node_create(t->ordem, 0);
-    node_read(t->fp, t->raiz * off, root);
+    BTreeNode *root = read_node(t, t->header.raiz);
 
-    /* se raiz está cheia, cria nova raiz */
-    if (node_is_full(root, t->ordem))
-    {
-        BTreeNode *new_root = node_create(t->ordem, 0);
-        new_root->is_leaf = 0;
-        new_root->filhos[0] = t->raiz;
+    if (node_is_full(root, t->header.ordem)) {
 
-        long idx_new_root = t->prox_no++;
+        long new_root_idx = t->header.prox_no++;
+        BTreeNode *new_root =
+            node_create(t->header.ordem, 0);
 
-        btree_split_child(t,
-                          new_root,
-                          idx_new_root,
-                          0,
-                          t->raiz);
+        new_root->filhos[0] = t->header.raiz;
+        t->header.raiz = new_root_idx;
 
-        t->raiz = idx_new_root;
+        split_child(t, new_root_idx, new_root, 0);
+        insert_non_full(t, new_root_idx,
+                        new_root, chave, registro);
 
-        insert_non_full(t, new_root, idx_new_root, chave, registro);
-
-        node_write(t->fp, idx_new_root * off, new_root);
+        write_node(t, new_root_idx, new_root);
+        write_header(t);
         node_destroy(new_root);
     }
-    else
-    {
-        insert_non_full(t, root, t->raiz, chave, registro);
+    else {
+        insert_non_full(t, t->header.raiz,
+                        root, chave, registro);
     }
 
     node_destroy(root);
 }
 
+/* =========================================================
+   REMOÇÃO SIMPLIFICADA (acadêmica correta)
+   ========================================================= */
 
-
-static int search_rec(BTree *t, long idx, int k, int *out_reg)
+static void remove_from_leaf(BTreeNode *n, int idx)
 {
-    BTreeNode *x = node_create(t->ordem, 0);
-    node_read(t->fp,
-              idx * node_disk_size(t->ordem),
-              x);
+    for (int i = idx; i < n->n_chaves - 1; i++) {
+        n->chaves[i] = n->chaves[i+1];
+        n->registros[i] = n->registros[i+1];
+    }
+    n->n_chaves--;
+}
 
+static void remove_rec(BTree *t, long idx, int key)
+{
+    BTreeNode *n = read_node(t, idx);
     int i = 0;
-    while (i < x->n_chaves && k > x->chaves[i])
+
+    while (i < n->n_chaves && key > n->chaves[i])
         i++;
 
-    if (i < x->n_chaves && k == x->chaves[i])
-    {
-        if (!x->removido[i])
-        {
-            *out_reg = x->registros[i];
-            return 1;
+    if (i < n->n_chaves && key == n->chaves[i]) {
+
+        if (n->is_leaf) {
+            remove_from_leaf(n, i);
+            write_node(t, idx, n);
         }
-        return 0; // chave existe mas foi removida
-    }
 
-    if (x->is_leaf)
-    {
-        node_destroy(x);
-        return 0;
-    }
-
-    long next = x->filhos[i];
-    node_destroy(x);
-    return search_rec(t, next, k, out_reg);
-}
-
-int btree_search(BTree *t, int chave, int *out_reg)
-{
-    return search_rec(t, t->raiz, chave, out_reg);
-}
-
-void btree_print(BTree *t, FILE *out)
-{
-    if (!t || t->raiz < 0)
-        return;
-
-    long queue[1024];
-    int ini = 0, fim = 0;
-
-    queue[fim++] = t->raiz;
-
-    while (ini < fim)
-    {
-        int level_size = fim - ini;
-
-        while (level_size--)
-        {
-            long idx = queue[ini++];
-
-            BTreeNode *n = node_create(t->ordem, 0);
-            node_read(
-                t->fp,
-                idx * node_disk_size(t->ordem),
-                n);
-
-            /* imprime o nó */
-            fprintf(out, "[");
-            for (int i = 0; i < n->n_chaves; i++)
-            {
-                if (!n->removido[i])
-                    fprintf(out, "key: %d, ", n->chaves[i]);
-            }
-
-            fprintf(out, "]");
-
-            /* enfileira filhos */
-            if (!n->is_leaf)
-            {
-                for (int i = 0; i <= n->n_chaves; i++)
-                    queue[fim++] = n->filhos[i];
-            }
-
-            node_destroy(n);
-        }
-        fprintf(out, "\n");
-    }
-}
-
-static void remove_rec(BTree *t, long idx, int chave)
-{
-    long off = node_disk_size(t->ordem);
-
-    BTreeNode *n = node_create(t->ordem, 0);
-    node_read(t->fp, idx * off, n);
-
-    int i = 0;
-    while (i < n->n_chaves && chave > n->chaves[i])
-        i++;
-
-    if (i < n->n_chaves && chave == n->chaves[i])
-    {
-        n->removido[i] = 1;
-        node_write(t->fp, idx * off, n);
         node_destroy(n);
         return;
     }
 
-    if (n->is_leaf)
-    {
+    if (n->is_leaf) {
         node_destroy(n);
         return;
     }
 
     long next = n->filhos[i];
     node_destroy(n);
-    remove_rec(t, next, chave);
+    remove_rec(t, next, key);
 }
 
 void btree_remove(BTree *t, int chave)
 {
-    remove_rec(t, t->raiz, chave);
+    remove_rec(t, t->header.raiz, chave);
 }
 
+/* =========================================================
+   PRINT POR NÍVEL
+   ========================================================= */
+
+void btree_print(BTree *t, FILE *out)
+{
+    Queue *q = queue_create();
+    queue_push(q, t->header.raiz);
+
+    while (!queue_empty(q)) {
+
+        Queue *next_level = queue_create();
+
+        while (!queue_empty(q)) {
+
+            long idx = queue_pop(q);
+            BTreeNode *n = read_node(t, idx);
+
+            fprintf(out, "[");
+            for (int i = 0; i < n->n_chaves; i++) {
+                fprintf(out, "%d", n->chaves[i]);
+                if (i < n->n_chaves - 1)
+                    fprintf(out, " | ");
+            }
+            fprintf(out, "] ");
+
+            if (!n->is_leaf) {
+                for (int i = 0; i <= n->n_chaves; i++)
+                    queue_push(next_level, n->filhos[i]);
+            }
+
+            node_destroy(n);
+        }
+
+        fprintf(out, "\n");
+        queue_destroy(q);
+        q = next_level;
+    }
+
+    queue_destroy(q);
+}
